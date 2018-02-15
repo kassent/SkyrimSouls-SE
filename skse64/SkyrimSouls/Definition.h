@@ -248,15 +248,14 @@ namespace SkyrimSouls
 
 		inline UInt32 GetFlagCount(UInt32 flag)
 		{
+			SimpleLocker locker(globalMenuStackLock);
 			UInt32 result = 0;
-			globalMenuStackLock->Lock();
 			for (UInt32 i = 0; i < menuStack.count; ++i)
 			{
 				auto * pMenu = menuStack[i];
 				if (pMenu && pMenu->flags & flag)
 					++result;
 			}
-			globalMenuStackLock->Release();
 			return result;
 		}
 
@@ -274,11 +273,18 @@ namespace SkyrimSouls
 		bool	IsFlagEnabled(BSFixedString & menuName, UInt32 flag);
 		bool	IsSkyrimSoulsMenu(BSFixedString & menuName);
 
-		DEF_MEMBER_FN(IsMenuOpen, bool, 0x00EBD7E0, BSFixedString & menuName);
+		inline bool	IsMenuOpen(BSFixedString & menuName)
+		{
+			SimpleLocker locker(&menuTableLock);
+			return IsMenuOpen_Internal(menuName);
+		}
+
+		DEF_MEMBER_FN(IsMenuOpen_Internal, bool, 0x00EBD7E0, BSFixedString & menuName);
 		DEF_MEMBER_FN(RegisterMenu, void, 0x00EBF050, const char * name, CreatorFunc creator);
 		DEF_MEMBER_FN(GetTopMenu, void, 0xEBDBA0, IMenu *& menu, UInt8 maxMenuDepth); // - 0xE
 		DEF_MEMBER_FN(ProcessMessage, void, 0xEBDCC0);
 		DEF_MEMBER_FN(DrawNextFrame, void, 0xEBE8F0);
+		DEF_MEMBER_FN(IsInMenuMode, bool, 0x009B8000);
 	};
 	STATIC_ASSERT(sizeof(MenuManager) == 0x1C8);
 	STATIC_ASSERT(offsetof(MenuManager, menuTable) == 0x128);
@@ -434,4 +440,39 @@ namespace SkyrimSouls
 
 
 	extern RelocPtr<InputDeviceManager*> g_inputDeviceMgr;
+
+
+
+	struct ThreadEventHandleManager
+	{
+		struct HandleData {
+			HANDLE	* data;
+			UInt32	count;
+		};
+
+		UInt64					unk00;	// 00
+		HandleData				** data;	// 08
+		UInt32					count;	// 10
+	};
+
+
+	extern RelocPtr<ThreadEventHandleManager*> g_threadEventHandleMgr;
+
+
+	class MenuHandler
+	{
+	public:
+		DEF_MEMBER_FN(Update, void, 0x8DAA70);
+	};
+	/*
+	int __fastcall sub_1026F0(__int64 a1)
+{
+  __int64 v1; // rbx@1
+
+  v1 = a1;
+  if ( dword_1EE3688 != 2 )
+    sub_C02210(&g_mainHeap_1EE3200, &dword_1EE3688);
+  return sub_C020A0(&g_mainHeap_1EE3200, v1, 0i64);
+}
+	*/
 }

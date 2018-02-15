@@ -15,14 +15,18 @@
 
 #include <vector>
 #include <queue>
+#include <dbghelp.h>
 
 #include "Definition.h"
 #include "Hooks.h"
 #include "HookUtil.h"
 
+#pragma comment ( lib, "dbghelp.lib" )
 
 namespace SkyrimSouls
 {
+	bool						s_skyrimSoulsMode = false;
+	volatile SInt32				s_uiDelegateCount = 0;
 	ICriticalSection			s_taskQueueLock;
 	std::queue<TaskDelegate*>	s_tasks;
 
@@ -165,6 +169,10 @@ namespace SkyrimSouls
 			ChangeMenuFlags_Code code(codeBuf);
 			g_localTrampoline.EndAlloc(code.getCurr());
 			g_branchTrampoline.Write5Branch(kHook_ChangeMenuFlags_Jmp, (uintptr_t)codeBuf);
+
+			uintptr_t location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 84 C0 74 58 38 1D ? ? ? ?", 0, 1, 5); //stopDrawingWorld flag check. //sub_5B0F20
+			UInt8 codes[] = { 0x48, 0x31, 0xC0, 0xC3, 0x90 };//xor rax, rax; retn;
+			SafeWriteBuf(location, codes, sizeof(codes));
 		}
 	};
 
@@ -195,7 +203,7 @@ namespace SkyrimSouls
 		{
 			uintptr_t location = RELOC_RUNTIME_ADDR("F2 0F 11 49 ? 89 69 44", -0x5A, 3, 7);
 			ReceiveEvent_Original = HookUtil::SafeWrite64(location + 1 * 8, &ReceiveEvent_Hook);
-
+			//disable fader menu.
 			location = RELOC_RUNTIME_ADDR("74 51 44 8B 89 ? ? ? ?");
 			SafeWrite8(location, 0xEB);
 		}
@@ -240,6 +248,7 @@ namespace SkyrimSouls
 
 		static void InitHooks()
 		{
+			//menu depth
 			uintptr_t location = RELOC_RUNTIME_ADDR("C6 46 18 03 C6 05 ? ? ? ? ?");
 			SafeWrite8(location + 0x3, 0x0);
 
@@ -250,49 +259,21 @@ namespace SkyrimSouls
 	DialogueMenu::FnProcessMessage	DialogueMenu::ProcessMessage_Original = nullptr;
 
 
-	class FavoritesMenu : public IMenu,
-		public MenuEventHandler
-	{
-	public:
-		using FnCanProcess = bool(__thiscall FavoritesMenu::*)(InputEvent *);
-		static FnCanProcess CanProcess_Original;
-
-		static void InitHooks()
-		{
-			uintptr_t location = RELOC_RUNTIME_ADDR("84 C0 75 1D 48 8B 03 48 8B CB");
-			SafeWrite16(location, 0x9090);
-		}
-	};
-	FavoritesMenu::FnCanProcess		FavoritesMenu::CanProcess_Original = nullptr;
-
-
 	class StatsMenu : public IMenu,
 		public MenuEventHandler
 	{
 	public:
 		using FnProcessMessage = UInt32(__thiscall StatsMenu::*)(UIMessage*);
 		//ctor 8CC400
-		using FnCanProcess = bool(__thiscall FavoritesMenu::*)(InputEvent *);
+		using FnCanProcess = bool(__thiscall StatsMenu::*)(InputEvent *);
 		static FnCanProcess		CanProcess_Original;
 		static FnProcessMessage ProcessMessage_Original;
-#ifdef DEBUG
-		UInt32 ProcessMessage_Hook(UIMessage * msg)
-		{
-			UInt32 result = (this->*ProcessMessage_Original)(msg);
-			return result;
-		}
-#endif
+
+
 		static void InitHooks()
 		{
-			uintptr_t location = RELOC_RUNTIME_ADDR("0F 85 ? ? ? ? 48 8D 43 D0");
+			uintptr_t location = RELOC_RUNTIME_ADDR("0F 85 ? ? ? ? 48 8D 43 ? 48 8B 4C 24 ?");
 			SafeWrite32(location + 2, 0);
-#ifdef DEBUG
-			location = RELOC_RUNTIME_ADDR("48 8D 05 ? ? ? ? 48 89 07 48 8D 05 ? ? ? ? 48 89 47 30 4C 89 67 40", 0, 3, 7);
-			ProcessMessage_Original = HookUtil::SafeWrite64(location + 4 * 0x8, &ProcessMessage_Hook);
-			//location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 3B 98 ? ? ? ? 0F 85 ? ? ? ?");
-			//UInt8 codes[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
-			//SafeWriteBuf(location, codes, sizeof(codes));
-#endif
 		}
 	};
 	StatsMenu::FnCanProcess				StatsMenu::CanProcess_Original = nullptr;
@@ -393,6 +374,22 @@ namespace SkyrimSouls
 	};
 
 
+	class FavoritesMenu : public IMenu,
+		public MenuEventHandler
+	{
+	public:
+		using FnCanProcess = bool(__thiscall FavoritesMenu::*)(InputEvent *);
+		static FnCanProcess CanProcess_Original;
+
+		static void InitHooks()
+		{
+			uintptr_t location = RELOC_RUNTIME_ADDR("75 1D 48 8B 03 48 8B CB FF 50 10");
+			SafeWrite16(location, 0x9090);
+		}
+	};
+	FavoritesMenu::FnCanProcess		FavoritesMenu::CanProcess_Original = nullptr;
+
+
 	class FavoritesHandler : public MenuEventHandler
 	{
 	public:
@@ -401,7 +398,7 @@ namespace SkyrimSouls
 
 		bool CanProcess_Hook(InputEvent * evn)
 		{
-			return (CoreController::globalControlCounter) ? false : (this->*CanProcess_Original)(evn);
+			return (s_skyrimSoulsMode) ? false : (this->*CanProcess_Original)(evn);
 		}
 
 		static void InitHooks()
@@ -418,7 +415,9 @@ namespace SkyrimSouls
 	public:
 		enum
 		{
-			kLootMode_Steal = 2
+			kLootMode_Steal = 1,
+			kLootMode_Pickpocket = 2,
+			kLootMode_Take
 		};
 
 		using FnDrawNextFrame = void(ContainerMenu::*)(float, UInt32);
@@ -429,11 +428,11 @@ namespace SkyrimSouls
 
 		void DrawNextFrame_Hook(float unk0, UInt32 unk1)
 		{
-			if ((flags & IMenu::kFlag_SkyrimSoulsMenu) && s_lootMode && s_containerOwnerHandle && (*s_lootMode) == kLootMode_Steal)
+			if ((flags & IMenu::kFlag_SkyrimSoulsMenu) && s_lootMode && s_containerOwnerHandle && (*s_lootMode) == kLootMode_Pickpocket)
 			{
 				TESObjectREFR * pRef = nullptr;
 				LookupREFRByHandle(s_containerOwnerHandle, &pRef);
-				if (pRef != nullptr && pRef->formType == kFormType_Character)
+				if (pRef != nullptr && pRef->Is(kFormType_Character))
 				{
 					auto * actor = static_cast<Actor*>(pRef);
 					if (!actor->IsDead(true) && !actor->IsDisabled() && !actor->IsDeleted())
@@ -652,94 +651,10 @@ namespace SkyrimSouls
 			UInt8 codes[] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
 			//SafeWriteBuf(RelocAddr<uintptr_t>(0x08D08D5), codes, sizeof(codes));
 			SafeWriteBuf(location, codes, sizeof(codes));
+			location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 90 48 8D 05 ? ? ? ? 48 89 44 24 ? 33 C0 48 89 46 48", 0x18);
+			SafeWrite32(location + 0x3, 0xC401);
 		}
 	};
-
-
-	class MainEx : public Main
-	{
-	public:
-		using FnIsGameRunning		= bool(*)(UInt32);
-
-		using FnReleaseSemaphore	= void(*)(BSTaskPool *);
-
-		static FnIsGameRunning		IsGameRunning_Original;
-
-		static FnReleaseSemaphore	ReleaseSemaphore_Original;
-
-		static bool IsGameRunning_Hook(UInt32 state)
-		{
-			return (!IsGameRunning_Original(state) || CoreController::globalControlCounter) ? false : true;
-		}
-
-		static void ReleaseSemaphore_Hook(BSTaskPool * pTaskPool)
-		{
-			s_taskQueueLock.Enter();
-			while (!s_tasks.empty())
-			{
-				TaskDelegate * cmd = s_tasks.front();
-				s_tasks.pop();
-				cmd->Run();
-				cmd->Dispose();
-			}
-			s_taskQueueLock.Leave();
-			ReleaseSemaphore_Original(pTaskPool);
-		}
-
-		static void InitHooks()
-		{
-			// Hook ui's DrawNextFrame update within main thread.
-			{
-				static uintptr_t location = RELOC_RUNTIME_ADDR("40 84 FF 75 19 48 8B 0D ? ? ? ?");
-				struct DrawNextFrame_Code : Xbyak::CodeGenerator
-				{
-					DrawNextFrame_Code(void * buf) : Xbyak::CodeGenerator(4096, buf)
-					{
-						Xbyak::Label continueRender;
-
-						test(dil, dil);
-						jz(continueRender);
-
-						mov(rax, (uintptr_t)&CoreController::globalControlCounter);
-						mov(eax, ptr[rax]);
-						cmp(eax, 0);
-						jnz(continueRender);
-						jmp(ptr[rip]);
-
-						dq(location + 0x1E);
-						L(continueRender);
-						jmp(ptr[rip]);
-						dq(location + 0x5);
-					}
-				};
-				void * codeBuf = g_localTrampoline.StartAlloc();
-				DrawNextFrame_Code code(codeBuf);
-				g_localTrampoline.EndAlloc(code.getCurr());
-				g_branchTrampoline.Write5Branch(location, (uintptr_t)codeBuf);
-			}
-
-			{
-				uintptr_t location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 84 C0 75 0C 48 8B 0D ? ? ? ? E8 ? ? ? ? 48 8B CB");
-				auto ReadOffsetData = [](uintptr_t location, SInt32 relOffset, UInt32 len)->uintptr_t
-				{
-					SInt32 rel32 = 0;
-					sig_scan_util::read_memory(location + relOffset, &rel32, sizeof(SInt32));
-					return location + len + rel32;
-				};
-				IsGameRunning_Original = reinterpret_cast<FnIsGameRunning>(ReadOffsetData(location, 1, 5));
-				g_branchTrampoline.Write5Call(location, (uintptr_t)IsGameRunning_Hook);
-
-				location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 90 48 8D 4C 24 ? E8 ? ? ? ? 48 8B 15 ? ? ? ?");
-				ReleaseSemaphore_Original = reinterpret_cast<FnReleaseSemaphore>(ReadOffsetData(location, 1, 5));
-				g_branchTrampoline.Write5Call(location, (uintptr_t)ReleaseSemaphore_Hook);
-
-				//location = RELOC_RUNTIME_ADDR("75 0C 40 0F B6 D7");//map menu related... TODO test.
-				//SafeWrite16(location, 0x9090);
-			}
-		}
-	};
-	MainEx::FnIsGameRunning				MainEx::IsGameRunning_Original = nullptr;
-	MainEx::FnReleaseSemaphore			MainEx::ReleaseSemaphore_Original = nullptr;
 
 
 	class JobListManager
@@ -790,40 +705,16 @@ namespace SkyrimSouls
 
 		static void UpdateUI_Hook()// non-main thread.
 		{
-			if (!(*isGameLoading) && !CoreController::globalControlCounter)
+			if (!(*isGameLoading))
 			{
-				UpdateUI_Original();
+				if (s_skyrimSoulsMode) {
+					_InterlockedIncrement(&s_uiDelegateCount);
+				}
+				else {
+					UpdateUI_Original();
+				}
 			}
 			SetEventEx(2);
-		}
-#ifdef DEBUG
-		static void InvokeThreadJob_Hook(void * pObj, void * functor)
-		{
-			using Fn = void(*)(void * pObj);
-			Fn fn = reinterpret_cast<Fn>(functor);
-			_MESSAGE("(A)%016I64X", (uintptr_t)functor - RelocationManager::s_baseAddr);
-			fn(pObj);
-			_MESSAGE("(B)%016I64X", (uintptr_t)functor - RelocationManager::s_baseAddr);
-		}
-#endif
-		static void WaitForShadowCulling_Hook(UInt32 unk0, UInt32 unk1) 
-		{
-#ifdef TODO
-			// check what uses this handle in future if have time.
-			if ((!(*g_menuManager)->IsMenuOpen((*g_uiStringHolder)->statsMenu) \
-				&& !(*g_menuManager)->IsMenuOpen((*g_uiStringHolder)->mapMenu))\
-				|| !CoreController::globalControlCounter)
-			{
-				return WaitForShadowCulling_Original(unk0, unk1);
-			}
-#endif
-			if((!(*g_menuManager)->IsMenuOpen((*g_uiStringHolder)->statsMenu) \
-				|| !(*g_menuManager)->IsSkyrimSoulsMenu((*g_uiStringHolder)->statsMenu))\
-				&& (!(*g_menuManager)->IsMenuOpen((*g_uiStringHolder)->mapMenu) \
-				|| !(*g_menuManager)->IsSkyrimSoulsMenu((*g_uiStringHolder)->mapMenu)))
-			{
-				return WaitForShadowCulling_Original(unk0, unk1);
-			}
 		}
 
 		static void InitHooks()
@@ -844,37 +735,10 @@ namespace SkyrimSouls
 			SafeWrite16(location + 0xB, 0x9090);
 			UInt8 codes[] = { 0xC3, 0x90, 0x90, 0x90, 0x90 };
 			SafeWriteBuf(location + 0x3B, codes, sizeof(codes));
-
-			location = RELOC_RUNTIME_ADDR("BA ? ? ? ? 8D 4A FC");
-			WaitForShadowCulling_Original = reinterpret_cast<FnShadowCulling>(ReadOffsetData(location + 0x8, 1, 5));
-			g_branchTrampoline.Write5Branch(location + 8, (uintptr_t)WaitForShadowCulling_Hook);
-#ifdef DEBUG
-			static uintptr_t kHook_InvokeThreadJob_Jmp = RELOC_RUNTIME_ADDR("48 8B 4C D0 ? FF 14 D0");
-			struct InvokeThreadJob_Code : Xbyak::CodeGenerator
-			{
-				InvokeThreadJob_Code(void * buf) : Xbyak::CodeGenerator(4096, buf)
-				{
-					mov(rcx, ptr[rax + rdx * 8 + 8]);
-					mov(rdx, ptr[rax + rdx * 8]);
-
-					mov(rax, (uintptr_t)InvokeThreadJob_Hook);
-					call(rax);
-
-					jmp(ptr[rip]);
-
-					dq(kHook_InvokeThreadJob_Jmp + 0x8);
-				}
-			};
-			void * codeBuf = g_localTrampoline.StartAlloc();
-			InvokeThreadJob_Code code(codeBuf);
-			g_localTrampoline.EndAlloc(code.getCurr());
-			g_branchTrampoline.Write6Branch(kHook_InvokeThreadJob_Jmp, (uintptr_t)codeBuf);
-			SafeWrite16(kHook_InvokeThreadJob_Jmp + 6, 0x9090);
-#endif
 		}
 	};
 	STATIC_ASSERT(sizeof(JobListManager::ServingThread) == 0x78);
-	STATIC_ASSERT(offsetof(JobListManager::ServingThread, isRunning) == 0x72);
+
 
 	JobListManager::FnJob			JobListManager::UpdateUI_Original = nullptr;
 	JobListManager::FnShadowCulling	JobListManager::WaitForShadowCulling_Original = nullptr;
@@ -893,20 +757,20 @@ namespace SkyrimSouls
 
 		static bool IsInMenuMode_Hook()
 		{
-			return (*menuMode1) || (*menuMode2) || CoreController::globalControlCounter;
+			return (*menuMode1) || (*menuMode2) || s_skyrimSoulsMode;
 		}
 
 		static void InitHooks()
 		{
-			static uintptr_t kHook_UpdateVirtualMachineTimer_Jmp = RELOC_RUNTIME_ADDR("01 BE ? ? ? ? 48 8B 0D ? ? ? ?");
+			static uintptr_t kHook_UpdateVirtualMachineTimer_Jmp = RELOC_RUNTIME_ADDR("01 BE ? ? ? ? 48 8B 0D ? ? ? ?");//0921CC5
 			struct UpdateVirtualMachineTimer_Code : Xbyak::CodeGenerator
 			{
 				UpdateVirtualMachineTimer_Code(void * buf) : Xbyak::CodeGenerator(4096, buf)
 				{
 					Xbyak::Label skipUpdate;
-					mov(rax, (uintptr_t)&CoreController::globalControlCounter);
-					mov(eax, ptr[rax]);
-					cmp(eax, 0);
+					mov(rax, (uintptr_t)&s_skyrimSoulsMode);
+					mov(al, ptr[rax]);
+					cmp(al, 0);
 					jnz(skipUpdate);
 					add(ptr[rsi + 0x690], edi);
 					L(skipUpdate);
@@ -928,12 +792,89 @@ namespace SkyrimSouls
 			uintptr_t location = RELOC_RUNTIME_ADDR("80 3D ? ? ? ? ? 75 0C 80 3D ? ? ? ? ?");
 			menuMode1 = reinterpret_cast<bool*>(ReadOffsetData(location, 2, 7));
 			menuMode2 = reinterpret_cast<bool*>(ReadOffsetData(location + 0x9, 2, 7));
+
 			g_branchTrampoline.Write5Branch(location, (uintptr_t)IsInMenuMode_Hook);
 			SafeWrite16(location + 0x5, 0x9090);
 		}
 	};
 	bool *				VirtualMachineEx::menuMode1 = nullptr;
 	bool *				VirtualMachineEx::menuMode2 = nullptr;
+
+
+	class MainEx : public Main
+	{
+	public:
+		using FnIsGameRunning = bool(*)(UInt32);
+
+		using FnReleaseSemaphore = void(*)(BSTaskPool *);
+
+		using FnProcessTlsIndex = void(*)(bool);
+
+		static FnIsGameRunning		IsGameRunning_Original;
+
+		static FnReleaseSemaphore	ReleaseSemaphore_Original;
+
+		static FnProcessTlsIndex	ProcessTlsIndex_Original;
+
+		static void ProcessTlsIndex_Hook(bool arg)
+		{
+			ProcessTlsIndex_Original(arg);
+			s_skyrimSoulsMode = CoreController::globalControlCounter != 0;
+		}
+
+		static bool IsGameRunning_Hook(UInt32 state)
+		{
+			if (_InterlockedExchange(&s_uiDelegateCount, 0))
+			{
+				JobListManager::UpdateUI_Original();
+			}
+			return IsGameRunning_Original(state);
+		}
+
+		static void ReleaseSemaphore_Hook(BSTaskPool * pTaskPool)
+		{
+			s_taskQueueLock.Enter();
+			while (!s_tasks.empty())
+			{
+				TaskDelegate * cmd = s_tasks.front();
+				s_tasks.pop();
+				cmd->Run();
+				cmd->Dispose();
+			}
+			s_taskQueueLock.Leave();
+			ReleaseSemaphore_Original(pTaskPool);
+		}
+
+		static void InitHooks()
+		{
+			 uintptr_t location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 84 C0 75 0C 48 8B 0D ? ? ? ? E8 ? ? ? ? 48 8B CB");
+			 auto ReadOffsetData = [](uintptr_t location, SInt32 relOffset, UInt32 len)->uintptr_t
+			 {
+				 SInt32 rel32 = 0;
+				 sig_scan_util::read_memory(location + relOffset, &rel32, sizeof(SInt32));
+				 return location + len + rel32;
+			 };
+			 IsGameRunning_Original = reinterpret_cast<FnIsGameRunning>(ReadOffsetData(location, 1, 5));
+			 g_branchTrampoline.Write5Call(location, (uintptr_t)IsGameRunning_Hook);
+
+			 location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 90 48 8D 4C 24 ? E8 ? ? ? ? 48 8B 15 ? ? ? ?");
+			 ReleaseSemaphore_Original = reinterpret_cast<FnReleaseSemaphore>(ReadOffsetData(location, 1, 5));
+
+			 g_branchTrampoline.Write5Call(location, (uintptr_t)ReleaseSemaphore_Hook);
+
+			 location = RELOC_RUNTIME_ADDR("E8 ? ? ? ? 48 8B 0D ? ? ? ? 83 B9 ? ? ? ? ? 0F 97 C0");
+			 ProcessTlsIndex_Original = reinterpret_cast<FnProcessTlsIndex>(ReadOffsetData(location, 1, 5));
+			 g_branchTrampoline.Write5Call(location, (uintptr_t)ProcessTlsIndex_Hook);
+#ifdef TODO
+			 //location = RELOC_RUNTIME_ADDR("75 0C 40 0F B6 D7");//map menu related... TODO test.
+			 //SafeWrite16(location, 0x9090);
+#endif // TODO
+
+		}
+	};
+	MainEx::FnIsGameRunning				MainEx::IsGameRunning_Original = nullptr;
+	MainEx::FnReleaseSemaphore			MainEx::ReleaseSemaphore_Original = nullptr;
+	MainEx::FnProcessTlsIndex			MainEx::ProcessTlsIndex_Original = nullptr;
 
 
 	class StartRemapModeEx : public GFxFunctionHandler
@@ -1104,6 +1045,62 @@ namespace SkyrimSouls
 	ConsoleCommand::FnGetCommandArgs		ConsoleCommand::GetCommandArgs = nullptr;
 
 
+	class CrashMiniDump
+	{
+	public:
+		static void CreateMiniDumpFile(EXCEPTION_POINTERS * pExceptionInfo)
+		{
+			SYSTEMTIME localTime;
+			GetLocalTime(&localTime);
+
+			char fileName[MAX_PATH] = { };
+			sprintf_s(fileName, "CrashDump-%04d-%02d-%02d-%02d-%02d-%02d.dmp", localTime.wYear, localTime.wMonth, localTime.wDay,\
+				localTime.wHour, localTime.wMinute, localTime.wSecond);
+
+			HANDLE fileHandle = CreateFileA(fileName, GENERIC_READ | GENERIC_WRITE,
+				0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+			if ((fileHandle != NULL) && (fileHandle != INVALID_HANDLE_VALUE))
+			{
+				MINIDUMP_EXCEPTION_INFORMATION mdei;
+
+				mdei.ThreadId = GetCurrentThreadId();
+				mdei.ExceptionPointers = pExceptionInfo;
+				mdei.ClientPointers = FALSE;
+
+				BOOL result = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), fileHandle, MiniDumpNormal, (pExceptionInfo != 0) ? &mdei : nullptr, 0, nullptr);
+				if (result)
+					MessageBoxA(NULL, "SkyrimSE.exe crashed, mini dump file has been created in the folder where SkyrimSE.exe is located.", "SkyrimSE", MB_OK);
+				CloseHandle(fileHandle);
+			}
+		}
+
+		static LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS * pExceptionInfo)
+		{
+			static bool bSkip = false;
+			if (!bSkip)
+			{
+				bSkip = true;
+				CreateMiniDumpFile(pExceptionInfo);
+			}
+			return EXCEPTION_CONTINUE_SEARCH; 
+		}
+
+		static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI SetUnhandledExceptionFilter_Hook(LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter)
+		{
+			uintptr_t location = reinterpret_cast<uintptr_t>(lpTopLevelExceptionFilter);
+			SafeWrite8(location + 1, 0);
+			return SetUnhandledExceptionFilter(UnhandledExceptionFilter);
+		}
+
+		static void InitHooks()
+		{
+			uintptr_t location = RELOC_RUNTIME_ADDR("FF 15 ? ? ? ? 33 C9 FF 15 ? ? ? ? E8 ? ? ? ?");
+			g_branchTrampoline.Write6Call(location, (uintptr_t)SetUnhandledExceptionFilter_Hook);
+		}
+	};
+
+
 	void RelocateRuntimeData()
 	{
 		RELOC_GLOBAL_VAL(LookupREFRByHandle, "E8 ? ? ? ? 90 49 8B 0E E8 ? ? ? ?", 0, 1, 5);
@@ -1129,11 +1126,12 @@ namespace SkyrimSouls
 
 		RELOC_MEMBER_FN(ConsoleManager, VPrint, "66 83 BD ? ? ? ? ? 75 52", -0x57);
 
-		RELOC_MEMBER_FN_EX(MenuManager, IsMenuOpen, "E8 ? ? ? ? 84 C0 74 2D 80 3D ? ? ? ? ?", 0, 1, 5);
+		RELOC_MEMBER_FN_EX(MenuManager, IsMenuOpen_Internal, "E8 ? ? ? ? 84 C0 74 2D 80 3D ? ? ? ? ?", 0, 1, 5);
 		RELOC_MEMBER_FN_EX(MenuManager, RegisterMenu, "48 8B C4 53 56 57 48 83 EC 50 48 C7 40 ? ? ? ? ?");
 		RELOC_MEMBER_FN_EX(MenuManager, GetTopMenu, "E8 ? ? ? ? 48 8B 4D 6F 80 79 18 02", 0, 1, 5);
 		RELOC_MEMBER_FN_EX(MenuManager, ProcessMessage, "E8 ? ? ? ? 45 84 FF 74 0E 45 0F B6 C6", 0, 1, 5);
 		RELOC_MEMBER_FN_EX(MenuManager, DrawNextFrame, "E8 ? ? ? ? E8 ? ? ? ? 48 8B C8 E8 ? ? ? ? 48 89 7C 24 ?", 0, 1, 5);
+		RELOC_MEMBER_FN_EX(MenuManager, IsInMenuMode, "80 3D ? ? ? ? ? 75 0C 80 3D ? ? ? ? ?");
 
 		RELOC_MEMBER_FN_EX(UIMessageManager, SendUIMessage, "E8 ? ? ? ? 48 8B 15 ? ? ? ? 48 81 C2 ? ? ? ? 45 33 C9 45 8D 41 0B", 0, 1, 5);
 
@@ -1150,6 +1148,8 @@ namespace SkyrimSouls
 		RELOC_MEMBER_FN_EX(BaseEventDispatcher, RemoveEventSink_Internal, "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 20 33 FF 48 8D 71 10", 0x4F0, 1, 5);
 		RELOC_MEMBER_FN_EX(BaseEventDispatcher, SendEvent_Internal, "4D 85 E4 74 1A 49 8B 0C 24", 0x36, 1, 5);
 
+		RELOC_MEMBER_FN_EX(MenuHandler, Update, "E8 ? ? ? ? 48 8B 0D ? ? ? ? E8 ? ? ? ? 84 C0 74 10", 0, 1, 5);
+
 		RELOC_GLOBAL_VAL(g_mainHeap, "48 8D 0D ? ? ? ? E8 ? ? ? ? 90 48 8B 53 20", 0, 3, 7);
 		RELOC_GLOBAL_VAL(g_gameSettingCollection, "48 8B 0D ? ? ? ? 48 8B 01 4C 8B C7 49 8B D6", 0, 3, 7);
 		RELOC_GLOBAL_VAL(g_thePlayer, "48 3B 3D ? ? ? ? 74 69", 0, 3, 7);
@@ -1160,6 +1160,7 @@ namespace SkyrimSouls
 		RELOC_GLOBAL_VAL(g_playerCamera, "48 8B 0D ? ? ? ? E8 ? ? ? ? 40 B6 01 48 8B 87 ? ? ? ?", 0, 3, 7);
 		RELOC_GLOBAL_VAL(g_inputDeviceMgr, "48 8B 0D ? ? ? ? E8 ? ? ? ? 4C 8B 00 48 8D 55 D8", 0, 3, 7);
 		RELOC_GLOBAL_VAL(g_console, "48 89 05 ? ? ? ? 8B 05 ? ? ? ? 0F 57 C0", 0, 3, 7);
+		RELOC_GLOBAL_VAL(g_threadEventHandleMgr, "48 89 05 ? ? ? ? 41 89 1C 3E E8 ? ? ? ? B2 01", 0, 3, 7);
 		RELOC_GLOBAL_VAL(globalMenuStackLock, "48 8D 05 ? ? ? ? 48 89 45 60 33 D2", 0, 3, 7);
 	}
 
@@ -1183,7 +1184,7 @@ namespace SkyrimSouls
 				const char * menuName = nullptr;
 				if (INDEX < CoreController::globalMenuSettings.size())
 					menuName = CoreController::globalMenuSettings[INDEX].menuName.c_str();
-				(*g_menuManager)->menuTableLock.Lock();
+				SimpleLocker locker(&(*g_menuManager)->menuTableLock);
 				auto & pHashSet = (*g_menuManager)->menuTable;
 				auto * pItem = pHashSet.Find(&BSFixedString(menuName));
 				if (pItem != nullptr)
@@ -1198,6 +1199,7 @@ namespace SkyrimSouls
 							if (CoreController::globalMenuSettings[kType_Console].isEnabled)
 							{
 								pItem->menuInstance->flags &= ~IMenu::kFlag_PauseGame;
+								pItem->menuInstance->flags &= ~IMenu::kFlag_StopDrawingWorld;
 								pItem->menuInstance->flags |= IMenu::kFlag_StopCrosshairUpdate;
 								pItem->menuInstance->flags |= IMenu::kFlag_SkyrimSoulsMenu;
 							}
@@ -1212,7 +1214,6 @@ namespace SkyrimSouls
 					_MESSAGE("Callback<%s>::Register()", menuName);
 					result = true;
 				}
-				(*g_menuManager)->menuTableLock.Release();
 			}
 			return result;
 		}
@@ -1255,15 +1256,18 @@ namespace SkyrimSouls
 		virtual ~GameplayControlHandler() { };
 		virtual	EventResult ReceiveEvent(MenuOpenCloseEvent * evn, EventDispatcher<MenuOpenCloseEvent> * dispatcher) override
 		{
-			//_MESSAGE("%s=%d", evn->menuName.c_str(), evn->opening);
-			auto functor = [evn](const MenuSetting & setting)->bool {return (setting.menuName == evn->menuName.c_str() && setting.isEnabled) ? true : false; };
+			//_MESSAGE("%s=%d", evn->menuName.c_str(), (*g_menuManager)->IsInMenuMode());
+			auto functor = [evn](const MenuSetting & setting)->bool {return (setting.menuName == evn->menuName.c_str()/* && setting.isEnabled*/) ? true : false; };
 			if (std::find_if(CoreController::globalMenuSettings.begin(), CoreController::globalMenuSettings.end(), functor) != CoreController::globalMenuSettings.end())
 			{
 				CoreController::globalControlCounter = (*g_menuManager)->GetFlagCount(IMenu::kFlag_SkyrimSoulsMenu);
 				if (CoreController::globalControlCounter)
 				{
 					PlayerControlsEx::DisableUserEvent(true);
-					(*g_uiMessageManager)->SendUIMessage((*g_uiStringHolder)->dialogueMenu, DialogueMenu::kMessage_Invisible, nullptr);
+					if ((*g_menuManager)->IsMenuOpen((*g_uiStringHolder)->dialogueMenu))
+					{
+						(*g_uiMessageManager)->SendUIMessage((*g_uiStringHolder)->dialogueMenu, DialogueMenu::kMessage_Invisible, nullptr);
+					}
 					if ((*g_thePlayer) && (*g_thePlayer)->actorState.IsSprinting())
 					{
 						(*g_thePlayer)->animGraphHolder.SendAnimationEvent("sprintStop");
@@ -1276,15 +1280,18 @@ namespace SkyrimSouls
 				else
 				{
 					PlayerControlsEx::DisableUserEvent(false);
-					(*g_uiMessageManager)->SendUIMessage((*g_uiStringHolder)->dialogueMenu, DialogueMenu::kMessage_Visible, nullptr);
+					if ((*g_menuManager)->IsMenuOpen((*g_uiStringHolder)->dialogueMenu))
+					{
+						(*g_uiMessageManager)->SendUIMessage((*g_uiStringHolder)->dialogueMenu, DialogueMenu::kMessage_Visible, nullptr);
+					}
 				}
 			}
 			if (!evn->opening)
 			{
-				static BSFixedString console("Console");
+				BSFixedString & console = (*g_uiStringHolder)->console;
 				if (evn->menuName == console)
 				{
-					(*g_menuManager)->menuTableLock.Lock();
+					SimpleLocker locker(&(*g_menuManager)->menuTableLock);
 					auto & pHashSet = (*g_menuManager)->menuTable;
 					auto * pItem = pHashSet.Find(&console);
 					if (pItem && pItem->menuInstance)
@@ -1302,7 +1309,6 @@ namespace SkyrimSouls
 							pItem->menuInstance->flags &= ~IMenu::kFlag_SkyrimSoulsMenu;
 						}
 					}
-					(*g_menuManager)->menuTableLock.Release();
 				}
 			}
 			return kEvent_Continue;
@@ -1362,40 +1368,46 @@ namespace SkyrimSouls
 
 	void InstallHooks()
 	{
-		LoadSettings();
-		try
+		static bool isInit = false;
+		if (!isInit)
 		{
-			RelocateRuntimeData();
-			BGSSaveLoadManager::InitHooks();
-			MenuManagerEx::InitHooks();
-			DialogueMenu::InitHooks();
-			StatsMenu::InitHooks();
-			MapMenu::InitHooks();
-			PlayerCameraEx::InitHooks();
-			JournalMenu::InitHooks();
-			FavoritesMenu::InitHooks();
-			FavoritesHandler::InitHooks();
-			BookMenu::InitHooks();
-			ContainerMenu::InitHooks();
-			TweenMenu::InitHooks();
-			SleepWaitMenu::InitHooks();
-			MainEx::InitHooks();
-			PlayerControlsEx::InitHooks();
-			JobListManager::InitHooks();
-			VirtualMachineEx::InitHooks();
-			StartRemapModeEx::InitHooks();
-			ConsoleCommand::InitHooks();
-		}
-		catch (const no_result_exception & exception)
-		{
-			_MESSAGE(exception.what());
-			MessageBoxA(nullptr, "Init process failed, please deactive SkyrimSouls and wait for updating.", "SkyrimSouls", MB_OK);
-		}
+			isInit = true;
+			LoadSettings();
+			try
+			{
+				RelocateRuntimeData();
+				BGSSaveLoadManager::InitHooks();
+				MenuManagerEx::InitHooks();
+				DialogueMenu::InitHooks();
+				StatsMenu::InitHooks();
+				MapMenu::InitHooks();
+				PlayerCameraEx::InitHooks();
+				JournalMenu::InitHooks();
+				FavoritesMenu::InitHooks();
+				FavoritesHandler::InitHooks();
+				BookMenu::InitHooks();
+				ContainerMenu::InitHooks();
+				TweenMenu::InitHooks();
+				SleepWaitMenu::InitHooks();
+				MainEx::InitHooks();
+				PlayerControlsEx::InitHooks();
+				JobListManager::InitHooks();
+				VirtualMachineEx::InitHooks();
+				StartRemapModeEx::InitHooks();
+				ConsoleCommand::InitHooks();
+				CrashMiniDump::InitHooks();
+			}
+			catch (const no_result_exception & exception)
+			{
+				_MESSAGE(exception.what());
+				MessageBoxA(nullptr, "Init process failed, please deactive SkyrimSouls and wait for updating.", "SkyrimSouls", MB_OK);
+			}
 
-		//00165FFC0 aBgs_logo_bik   db 'BGS_Logo.bik',0     ; DATA XREF: .data:off_1E13B78o
-		//SafeWrite32(RelocAddr<uintptr_t>(0x00165FFC0), 0);
+			//00165FFC0 aBgs_logo_bik   db 'BGS_Logo.bik',0     ; DATA XREF: .data:off_1E13B78o
+			//SafeWrite32(RelocAddr<uintptr_t>(0x00165FFC0), 0);
 
-		if (g_messaging != nullptr)
-			g_messaging->RegisterListener(g_pluginHandle, "SKSE", SKSEMessageHandler);
+			if (g_messaging != nullptr)
+				g_messaging->RegisterListener(g_pluginHandle, "SKSE", SKSEMessageHandler);
+		}
 	}
 }

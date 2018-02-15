@@ -17,6 +17,8 @@ namespace SkyrimSouls
 	RelocPtr<PlayerCamera*>		g_playerCamera(0x02EEB938);
 
 	RelocPtr<InputDeviceManager*> g_inputDeviceMgr(0x02F4B728);
+
+	RelocPtr<ThreadEventHandleManager*> g_threadEventHandleMgr(0x2F4C5F0);
 }
 
 namespace SkyrimSouls
